@@ -2,7 +2,8 @@
 STEP 4: Deploy as a Web API
 =============================
 This Flask app serves the trained model as a REST API.
-You can send it recent sales data and it returns a demand prediction.
+You can send it a category, channel, region, recent weekly sales, and a target
+month, and it returns a demand prediction for that specific series.
 
 To run:
     python app.py
@@ -12,12 +13,14 @@ Then open your browser to:
 
 API endpoint:
     POST /predict
-    Send JSON with recent weekly sales, get back a prediction.
+    Send JSON with category, channel, region, recent weekly sales and month,
+    get back a prediction.
 
 Example request (using curl):
     curl -X POST http://localhost:5000/predict \
          -H "Content-Type: application/json" \
-         -d '{"recent_sales": [180, 195, 210, 200, 185, 190, 205, 215], "month": 3}'
+         -d '{"category": "Outerwear", "channel": "Online", "region": "UK", \
+              "recent_sales": [180, 195, 210, 200, 185, 190, 205, 215], "month": 3}'
 """
 
 import os
@@ -30,23 +33,39 @@ from model import DemandLSTM
 
 BASE_DIR = os.path.dirname(__file__)
 
+CATEGORIES = [
+    "Leather Goods", "Outerwear", "Accessories",
+    "Scarves", "Shoes", "Ready to Wear",
+]
+CHANNELS = ["Online", "In-Store", "Wholesale"]
+REGIONS = ["UK", "EU", "US"]
+
+INPUT_SIZE = 3 + len(CATEGORIES) + len(CHANNELS) + len(REGIONS)  # 15
+
 app = Flask(__name__)
+
+
+def one_hot(value, options):
+    vec = [0.0] * len(options)
+    vec[options.index(value)] = 1.0
+    return vec
+
 
 # ── Load the trained model and scaler ──
 def load_model():
     """Load the trained LSTM model and scaler."""
-    # Load scaler (to normalise/denormalise values)
     with open(os.path.join(BASE_DIR, "scaler.pkl"), "rb") as f:
         scaler = pickle.load(f)
 
-    # Recreate model architecture and load trained weights
-    model = DemandLSTM(input_size=3, hidden_size=64, num_layers=2, output_size=1)
+    # Recreate model architecture and load trained weights.
+    # input_size=15: units_scaled, month_sin, month_cos, category[6], channel[3], region[3]
+    model = DemandLSTM(input_size=INPUT_SIZE, hidden_size=64, num_layers=2, output_size=1)
     model.load_state_dict(torch.load(
         os.path.join(BASE_DIR, "trained_model.pth"),
         map_location=torch.device("cpu"),
         weights_only=True
     ))
-    model.eval()  # Set to evaluation mode
+    model.eval()
 
     return model, scaler
 
@@ -73,6 +92,7 @@ HTML_TEMPLATE = """
         input, select { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px;
                         font-size: 14px; margin-bottom: 15px; }
         input:focus, select:focus { outline: none; border-color: #2563eb; }
+        .row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
         button { background: #1a1a1a; color: white; padding: 12px 24px; border: none;
                  border-radius: 8px; font-size: 14px; cursor: pointer; font-weight: 600; }
         button:hover { background: #333; }
@@ -87,18 +107,34 @@ HTML_TEMPLATE = """
 <body>
     <div class="container">
         <h1>Demand Forecasting Model</h1>
-        <p class="subtitle">LSTM Neural Network | PyTorch | Retail Demand Prediction</p>
+        <p class="subtitle">LSTM Neural Network | PyTorch | 6 categories x 3 channels x 3 regions</p>
 
         <div class="card">
             <h2>Predict Next Week's Demand</h2>
             <p style="color:#666; font-size:13px; margin-bottom:20px;">
-                Enter the last 8 weeks of unit sales and the target month to forecast next week's demand.
+                Choose a category, channel, and region, enter the last 8 weeks of unit sales,
+                and pick the target month to forecast next week's demand for that series.
             </p>
+
+            <div class="row">
+                <div>
+                    <label>Category</label>
+                    <select id="category">__CATEGORY_OPTIONS__</select>
+                </div>
+                <div>
+                    <label>Channel</label>
+                    <select id="channel">__CHANNEL_OPTIONS__</select>
+                </div>
+                <div>
+                    <label>Region</label>
+                    <select id="region">__REGION_OPTIONS__</select>
+                </div>
+            </div>
 
             <label>Last 8 Weeks of Sales (comma-separated)</label>
             <input type="text" id="sales" placeholder="e.g. 180, 195, 210, 200, 185, 190, 205, 215"
                    value="180, 195, 210, 200, 185, 190, 205, 215">
-            <p class="help">Enter 8 numbers representing weekly unit sales</p>
+            <p class="help">Enter 8 numbers representing weekly unit sales for the series chosen above</p>
 
             <label>Target Month</label>
             <select id="month">
@@ -123,10 +159,11 @@ HTML_TEMPLATE = """
             <h2>API Usage</h2>
             <p style="font-size: 13px; color: #666; line-height: 1.6;">
                 <strong>POST /predict</strong><br>
-                <code style="background:#f5f5f5; padding:2px 6px; border-radius:4px;">
+                <code style="background:#f5f5f5; padding:2px 6px; border-radius:4px; display:block; margin-top:6px;">
                 curl -X POST http://localhost:5000/predict
                 -H "Content-Type: application/json"
-                -d '{"recent_sales": [180, 195, 210, 200, 185, 190, 205, 215], "month": 3}'
+                -d '{"category": "Outerwear", "channel": "Online", "region": "UK",
+                     "recent_sales": [180, 195, 210, 200, 185, 190, 205, 215], "month": 3}'
                 </code>
             </p>
         </div>
@@ -134,6 +171,9 @@ HTML_TEMPLATE = """
 
     <script>
         async function predict() {
+            const category = document.getElementById('category').value;
+            const channel = document.getElementById('channel').value;
+            const region = document.getElementById('region').value;
             const salesInput = document.getElementById('sales').value;
             const month = parseInt(document.getElementById('month').value);
             const sales = salesInput.split(',').map(s => parseInt(s.trim()));
@@ -146,13 +186,14 @@ HTML_TEMPLATE = """
             const response = await fetch('/predict', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ recent_sales: sales, month: month })
+                body: JSON.stringify({ category, channel, region, recent_sales: sales, month: month })
             });
 
             const data = await response.json();
             document.getElementById('prediction').textContent = data.predicted_demand + ' units';
             document.getElementById('detail').textContent =
-                'Based on ' + sales.length + ' weeks of history | Avg input: ' +
+                category + ' | ' + channel + ' | ' + region + ' | Based on ' + sales.length +
+                ' weeks of history | Avg input: ' +
                 Math.round(sales.reduce((a,b) => a+b) / sales.length) + ' units/week';
             document.getElementById('result').style.display = 'block';
         }
@@ -162,19 +203,30 @@ HTML_TEMPLATE = """
 """
 
 
+def _options_html(values):
+    return "".join(f'<option value="{v}">{v}</option>' for v in values)
+
+
 @app.route("/")
 def home():
     """Serve the web interface."""
-    return render_template_string(HTML_TEMPLATE)
+    html = (HTML_TEMPLATE
+            .replace("__CATEGORY_OPTIONS__", _options_html(CATEGORIES))
+            .replace("__CHANNEL_OPTIONS__", _options_html(CHANNELS))
+            .replace("__REGION_OPTIONS__", _options_html(REGIONS)))
+    return render_template_string(html)
 
 
 @app.route("/predict", methods=["POST"])
 def predict():
     """
-    Predict next week's demand.
+    Predict next week's demand for a specific category/channel/region series.
 
     Expected JSON:
         {
+            "category": "Outerwear",
+            "channel": "Online",
+            "region": "UK",
             "recent_sales": [180, 195, 210, 200, 185, 190, 205, 215],
             "month": 3
         }
@@ -184,41 +236,52 @@ def predict():
             "predicted_demand": 198,
             "input_avg": 196.9,
             "month": 3,
-            "model": "LSTM (2-layer, 64 hidden units)"
+            "category": "Outerwear",
+            "channel": "Online",
+            "region": "UK",
+            "model": "LSTM (2-layer, 64 hidden units, 15 input features)"
         }
     """
     data = request.get_json()
 
-    # Validate input
+    category = data.get("category")
+    channel = data.get("channel")
+    region = data.get("region")
     recent_sales = data.get("recent_sales", [])
     month = data.get("month", 1)
 
+    if category not in CATEGORIES:
+        return jsonify({"error": f"category must be one of {CATEGORIES}"}), 400
+    if channel not in CHANNELS:
+        return jsonify({"error": f"channel must be one of {CHANNELS}"}), 400
+    if region not in REGIONS:
+        return jsonify({"error": f"region must be one of {REGIONS}"}), 400
     if len(recent_sales) != 8:
         return jsonify({"error": "Please provide exactly 8 weeks of sales data"}), 400
 
-    # Prepare input features
-    # Normalise sales using the same scaler used during training
+    # Normalise sales using the same global scaler used during training
     sales_scaled = scaler.transform(np.array(recent_sales).reshape(-1, 1)).flatten()
 
-    # Calculate month encoding (sin/cos)
+    # Month encoding (sin/cos)
     month_sin = np.sin(2 * np.pi * month / 12)
     month_cos = np.cos(2 * np.pi * month / 12)
 
-    # Build the input sequence: (1, 8, 3) — 1 sample, 8 timesteps, 3 features
-    sequence = np.zeros((8, 3))
+    # Static one-hot context for this series, repeated across all 8 timesteps
+    static = one_hot(category, CATEGORIES) + one_hot(channel, CHANNELS) + one_hot(region, REGIONS)
+
+    # Build the input sequence: (1, 8, 15) — 1 sample, 8 timesteps, 15 features
+    sequence = np.zeros((8, INPUT_SIZE))
     for i in range(8):
-        sequence[i, 0] = sales_scaled[i]  # Normalised sales
-        sequence[i, 1] = month_sin         # Month sin
-        sequence[i, 2] = month_cos         # Month cos
+        sequence[i, 0] = sales_scaled[i]
+        sequence[i, 1] = month_sin
+        sequence[i, 2] = month_cos
+        sequence[i, 3:] = static
 
-    # Convert to PyTorch tensor
-    input_tensor = torch.FloatTensor(sequence).unsqueeze(0)  # Add batch dimension
+    input_tensor = torch.FloatTensor(sequence).unsqueeze(0)
 
-    # Make prediction
     with torch.no_grad():
         prediction_scaled = model(input_tensor)
 
-    # Convert back to original scale
     prediction = scaler.inverse_transform(prediction_scaled.numpy())[0][0]
     predicted_demand = max(0, int(round(prediction)))
 
@@ -226,7 +289,10 @@ def predict():
         "predicted_demand": predicted_demand,
         "input_avg": round(float(np.mean(recent_sales)), 1),
         "month": month,
-        "model": "LSTM (2-layer, 64 hidden units)"
+        "category": category,
+        "channel": channel,
+        "region": region,
+        "model": "LSTM (2-layer, 64 hidden units, 15 input features)"
     })
 
 
